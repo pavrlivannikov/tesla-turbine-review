@@ -386,53 +386,79 @@ class BoundaryLayerModel:
 class UnipolarGenerator:
     """
     Униполярный генератор (диск Фарадея).
-    U = B·ω·R²/2  на один диск.
-
-    Мощность ограничена механикой: P_elec ≤ P_mech.
-    Реальный ток: I = min(U/R_total, P_mech/U).
+    
+    ФИЗИКА: U = B·ω·R²/2 — напряжение ОДНОГО диска.
+    Диски на общем валу — параллельное соединение (токи складываются,
+    напряжение общее). Последовательное соединение униполярных
+    генераторов на одном валу физически невозможно без отдельных
+    магнитных цепей.
+    
+    R_диска (Al, D=200 мм, t=1 мм): ρ_Al·π·R / (π·R·t) ≈ 2.6e-8/0.001 ≈ 26 мкОм
+    — пренебрежимо мало. Основное сопротивление — контактные щётки.
+    
+    P_elec ≤ P_mech (закон сохранения энергии).
     """
-    def __init__(self, B: float = 0.5, R_contact: float = 0.05,
-                 R_load: float = 0.3):
+    RHO_AL = 2.65e-8  # Ом·м — удельное сопротивление алюминия
+    
+    def __init__(self, B: float = 0.5, R_brush: float = 0.15):
         self.B = B
-        self.R_contact = R_contact
-        self.R_load = R_load
+        self.R_brush = R_brush      # сопротивление одной щётки, Ом
 
-    def voltage_one(self, omega: float, R: float) -> float:
+    def disk_resistance(self, R: float, thickness: float = 0.001) -> float:
+        """Внутреннее сопротивление алюминиевого диска (радиальное), Ом."""
+        # R = ρ/(2πt) · ln(R/r0), r0 — радиус оси (~5 мм)
+        r0 = 0.005
+        if R <= r0:
+            return 0.0
+        return self.RHO_AL / (2.0 * PI * thickness) * math.log(R / r0)
+
+    def voltage(self, omega: float, R: float) -> float:
+        """Напряжение холостого хода, В: U = B·ω·R²/2."""
         return self.B * omega * R**2 / 2.0
 
     def power(self, omega: float, R: float, N_disks: int,
-              P_mech: float = 1e9, series: bool = True) -> Tuple[float, float, float]:
+              P_mech: float, disk_thickness: float = 0.001) -> Tuple[float, float, float]:
         """
         Расчёт (U, I, P_elec) с учётом механического ограничения.
+        
+        Диски — параллельно: R_int = (R_диска + 2·R_щётки) / N_disks.
+        Нагрузка согласована: R_load = R_int (максимальная передача мощности).
+        Ток ограничен механикой: I_max = P_mech / U.
         """
-        if series:
-            U = self.voltage_one(omega, R) * N_disks
-            R_total = self.R_contact * (1 + 0.1 * (N_disks - 1)) + self.R_load
-        else:
-            U = self.voltage_one(omega, R)
-            R_total = self.R_contact / N_disks + self.R_load
-
-        if R_total <= 0 or U <= 0:
+        U = self.voltage(omega, R)
+        if U <= 0 or N_disks <= 0:
             return 0.0, 0.0, 0.0
-
-        # Максимальный ток по закону Ома
-        I_load = U / R_total
-        P_load = U * I_load
-
-        # Ток ограничен механикой
-        I_mech_limit = P_mech / U if U > 0 else 0.0
-        I = min(I_load, I_mech_limit)
-        P = U * I
-
-        return U, I, P
+        
+        R_disk = self.disk_resistance(R, disk_thickness)
+        R_internal = (R_disk + 2.0 * self.R_brush) / N_disks
+        
+        # Согласованная нагрузка: R_load = R_internal (max power transfer)
+        # Но не меньше 0.01 Ом (физический предел)
+        R_load_matched = max(R_internal, 0.01)
+        R_total = R_internal + R_load_matched
+        
+        if R_total <= 0:
+            return U, 0.0, 0.0
+        
+        # Ток по закону Ома
+        I_ohm = U / R_total
+        
+        # Механический предел: P_gen = U·I ≤ P_mech
+        I_mech = P_mech / U if U > 0 else 0.0
+        I = min(I_ohm, I_mech)
+        
+        # Полезная мощность в нагрузке (согласованной)
+        P_out = I * I * R_load_matched
+        
+        return U, I, P_out
 
     def power_gain(self, omega: float, R: float, N_disks: int,
-                   P_mech: float = 1e9) -> Tuple[float, float, float]:
-        """С жидкометаллическим контактом (R_contact = 0.01 Ом)."""
-        saved = self.R_contact
-        self.R_contact = 0.01
-        res = self.power(omega, R, N_disks, P_mech)
-        self.R_contact = saved
+                   P_mech: float, disk_thickness: float = 0.001) -> Tuple[float, float, float]:
+        """С жидкометаллическим контактом GaIn (R_brush ≈ 0.005 Ом)."""
+        saved = self.R_brush
+        self.R_brush = 0.005
+        res = self.power(omega, R, N_disks, P_mech, disk_thickness)
+        self.R_brush = saved
         return res
 
 
