@@ -45,7 +45,6 @@ tesla-turbine-review/
         ├── power_vs_deltaT.png   # Мощность vs перепад температур
         ├── kappa_vs_gap.png      # κ vs зазор
         ├── body_comparison.png   # Сравнение рабочих тел
-        └── cost_comparison.png   # Стоимость vs аналоги
 ```
 
 ## Быстрый старт
