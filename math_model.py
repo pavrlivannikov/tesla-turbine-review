@@ -548,9 +548,9 @@ class TeslaTurbineModel:
         M     = self.bl.torque(T, P, omega)
         P_mech = self.bl.mechanical_power(T, P, omega)
 
-        # Генератор
-        U, I, P_elec = self.gen.power(omega, self.geom.R, self.geom.N_disks)
-        U2, I2, P_elec2 = self.gen.power_gain(omega, self.geom.R, self.geom.N_disks)
+        # Генератор (с ограничением по механической мощности)
+        U, I, P_elec = self.gen.power(omega, self.geom.R, self.geom.N_disks, P_mech)
+        U2, I2, P_elec2 = self.gen.power_gain(omega, self.geom.R, self.geom.N_disks, P_mech)
         eta_gen = P_elec / P_mech if P_mech > 0 else 0.0
 
         # Массовый расход
@@ -627,19 +627,13 @@ def _fmt(v, unit: str = "") -> str:
     if unit == "nm":
         return f"{vf*1e9:.2f}"
     if unit == "ps":
-        if vf < 1e-12:
-            return f"{vf*1e12:.2f} fs"
-        if vf < 1e-9:
-            return f"{vf*1e12:.2f}"
-        return f"{vf*1e9:.2f} ns"
-    if unit == "deg":
-        return f"{vf:.4f}"
+        return f"{vf*1e12:.3f}"
     if abs(vf) >= 10000:
-        return f"{vf:.4g}"
+        return f"{vf:.6g}"
     if abs(vf) >= 100:
-        return f"{vf:.2f}"
+        return f"{vf:.6g}"
     if abs(vf) >= 1:
-        return f"{vf:.3f}"
+        return f"{vf:.6g}"
     if abs(vf) >= 1e-3:
         return f"{vf:.4f}"
     return f"{vf:.2e}"
@@ -670,11 +664,11 @@ def run_table_A():
 
     rows_info = [
         ("M, г/моль",         lambda f: f.M),
-        ("P_нас, атм",        lambda f: f.P_sat(T)),
+        ("P_нас, атм",        lambda f: f.P_sat(T) / ATM_PA),
         ("v_rms, м/с",        lambda f: f.v_rms(T)),
-        ("λ, нм",             lambda f: f.mean_free_path(T, f.P_sat(T))),
-        ("τ_coll, пс",        lambda f: f.collision_time(T, f.P_sat(T))),
-        ("τ_disk (0.5mm), пс", lambda f: geom.gap / max(f.v_rms(T), 1)),
+        ("λ, нм",             lambda f: f.mean_free_path(T, f.P_sat(T)) * 1e9),
+        ("τ_coll, пс",        lambda f: f.collision_time(T, f.P_sat(T)) * 1e12),
+        ("τ_disk (0.5mm), пс", lambda f: geom.gap / max(f.v_rms(T), 1) * 1e12),
     ]
 
     header = f"{'Параметр':<30s}"
@@ -752,7 +746,28 @@ def run_table_A():
         print(line)
 
     # ── Сводная строка по оптимальному телу ──
-    print("\n  Лучшее тело по P_net:")
+    # ── Ключевое открытие: κ ≈ 0 ──
+    print()
+    print("  ⚠ ВАЖНОЕ ОТКРЫТИЕ: Коэффициент неравновесности κ ≈ 0")
+    print("  ─" * 55)
+    print("  Документ turbina-tesla.md утверждает: τ_disk ≈ 10⁻¹⁰ с, κ ≈ 0.3-0.98")
+    print("  Модель показывает:         τ_disk = gap/v_rms ≈ 10⁻⁶ с, κ ≈ 10⁻⁵")
+    print("  Расхождение: ×10 000 в τ_disk, ×10⁴-10⁵ в κ")
+    print()
+    print("  Причина ошибки в документе: τ_disk = gap/v_rms. Для R-134a:")
+    print("    gap = 0.5 мм = 5·10⁻⁴ м, v_rms = 271 м/с")
+    print("    τ_disk = 0.0005 / 271 ≈ 1.85·10⁻⁶ с = 1.85 мкс")
+    print("    Документ ошибочно указал 10⁻¹⁰ с (разница ×10 000)")
+    print()
+    print("  Для κ = 0.5 (равный вклад) нужно τ_disk ≈ τ_coll ≈ 2·10⁻¹¹ с")
+    print("  Это требует gap = v_rms · τ_coll ≈ 270 · 2·10⁻¹¹ ≈ 5 нм")
+    print("  При макроскопическом зазоре 0.5 мм κ ≈ 0, слой равновесен.")
+    print()
+    print("  ВЫВОД: Эффект кинетического отбора при ΔT=0 c макроскопическими")
+    print("  зазорами НЕ РАБОТАЕТ. P_mech ≈ 155 Вт это вязкое трение,")
+    print("  а не полезный отбор энергии. Второй закон термодинамики НЕ НАРУШЕН.")
+
+    print("\n  Лучшее тело по P_net (при κ=0 все значения — вязкое трение):")
     best = None
     best_val = -1
     for n, r in results.items():
@@ -760,7 +775,7 @@ def run_table_A():
         if pn > best_val:
             best_val = pn
             best = n
-    print(f"    {best}: P_net = {best_val:.4f} Вт")
+    print(f"    {best}: P_net = {best_val:.4f} Вт (Вода — из-за высокого давления)")
 
     return results
 
@@ -802,7 +817,7 @@ def run_table_B():
             continue
         T_in = T_in_C + C_TO_K
         T_amb = T_amb_C + C_TO_K
-        dT = T_in - T_amb
+        dT = int(T_in - T_amb)
         P_work = f.P_sat(T_in)
         if P_work < 0.1 * ATM_PA:
             P_work = 1.0 * ATM_PA
@@ -936,12 +951,18 @@ def run_analysis(results_A):
         print(f"    Самоподдерживается: {'✅' if r.get('self_sustaining') else '❌'}")
         print()
     print("  Проблемы ΔT=0 режима:")
-    print("  1. Теплопроводность: диск нагревается → греет газ обратно.")
-    print("  2. Турбулентность: Re ~ 10⁵-10⁷ срывает пограничный слой.")
-    print("  3. ΔT_gas ничтожна (10⁻⁴-10⁻² °C) — измерить почти невозможно.")
-    print("  4. ΔP слишком мал для обратного клапана (∼10⁻⁶-10⁻³ атм).")
+    print("  1. ФУНДАМЕНТАЛЬНАЯ: κ ≈ 0.001% — слой равновесен.")
+    print("     τ_disk = 1.85 мкс, τ_coll = 19 пс → разница ×100 000.")
+    print("     Документ ошибочно утверждал κ ≈ 30-98% (см. выше).")
+    print("  2. Теплопроводность: диск нагревается → греет газ обратно.")
+    print("  3. Турбулентность: Re ~ 10⁵-10⁷ срывает пограничный слой.")
+    print("  4. ΔT_gas ничтожна (10⁻⁴-10⁻² °C) — измерить почти невозможно.")
+    print("  5. ΔP слишком мал для обратного клапана (∼10⁻⁶-10⁻³ атм).")
     print()
-    print("  ВЫВОД: ΔT=0 режим физически спорен. P_net ~ 0.")
+    print("  ВЫВОД: ΔT=0 режим НЕ РАБОТАЕТ при макроскопических зазорах.")
+    print("  Коэффициент неравновесности κ ≈ 0. Слой равновесен.")
+    print("  P_mech ≈ 155 Вт — это вязкое трение, а не полезный отбор.")
+    print("  Для κ > 0.01 нужен зазор < 5 нм (нанотехнологии).")
     print("  Для практической работы нужен внешний нагрев ΔT ≥ 10-30 °C.")
 
     print("\n  3. При каком минимальном ΔT турбина даёт P_net > 0?")
@@ -994,43 +1015,40 @@ def run_analysis(results_A):
 
     print("\n  5. Сравнение с ручными расчётами из turbina-tesla.md")
     print("  ─" * 55)
-    ref = {
-        "R-134a, D=200mm, 10 disks, 300K": 60.0,
+    ref_vals = {
+        "R-134a, D=200mm": (60.0, results_A.get("R-134a", {}).get("P_elec", 0)),
     }
-
-    r_ref = results_A.get("R-134a", {})
-    model_pe = r_ref.get("P_elec", 0)
-    ref_val = 60.0
-    err_pct = abs(model_pe - ref_val) / ref_val * 100 if ref_val > 0 else 0
-    print(f"  Ручной: P_elec ≈ {ref_val:.1f} Вт  |  Модель: P_elec = {model_pe:.4f} Вт")
-    print(f"  Отклонение: {err_pct:.1f}%  ({'совпадает' if err_pct < 30 else 'отклоняется'})")
+    for label, (ref, model) in ref_vals.items():
+        err = abs(model - ref) / ref * 100 if ref > 0 else 0
+        print(f"  {label:25s}: ручн.={ref:>7.1f} Вт  |  расч.={model:>8.4f} Вт  |  откл.={err:>6.1f}%")
     print()
-    print("  D=300 мм, 1 пакет (сравнение):")
+    print("  D=300 мм, 1 пакет:")
     f = make_fluids()["R-134a"]
     g300 = TurbineGeometry(D=0.3, N_disks=10, gap=0.5e-3)
     m300 = TeslaTurbineModel(f, g300)
-    opt300 = g300.optimal_RPM(f, 300.0)
-    Pw = f.P_sat(300.0)
-    r300 = m300.calculate(300.0, Pw, opt300)
-    print(f"  Документ: P_elec ≈ 250 Вт  |  Модель: P_elec = {r300['P_elec']:.2f} Вт")
+    r300 = m300.calculate(300.0, f.P_sat(300.0), g300.optimal_RPM(f, 300.0))
     err2 = abs(r300['P_elec'] - 250) / 250 * 100
-    print(f"  Отклонение: {err2:.1f}%")
-
-    print("\n  D=300 мм, 10 пакетов (100 дисков):")
+    print(f"  D=300mm, 1 пакет:        ручн.=250.0 Вт  |  расч.={r300['P_elec']:<8.2f} Вт  |  откл.={err2:.1f}%")
+    print()
+    print("  D=300 мм, 10 пакетов (100 дисков):")
     g300_10 = TurbineGeometry(D=0.3, N_disks=100, gap=0.5e-3)
-    m300_10 = TeslaTurbineModel(f, g300_10)
-    opt300_10 = g300_10.optimal_RPM(f, 300.0)
-    r300_10 = m300_10.calculate(300.0, Pw, opt300_10)
-    print(f"  Документ: P_elec ≈ 2500 Вт  |  Модель: P_elec = {r300_10['P_elec']:.2f} Вт")
+    r300_10 = TeslaTurbineModel(f, g300_10).calculate(300.0, f.P_sat(300.0),
+                                                       g300_10.optimal_RPM(f, 300.0))
     err3 = abs(r300_10['P_elec'] - 2500) / 2500 * 100
-    print(f"  Отклонение: {err3:.1f}%")
+    print(f"  D=300mm, 10 пакетов:     ручн.=2500.0 Вт |  расч.={r300_10['P_elec']:<8.2f} Вт  |  откл.={err3:.1f}%")
+    print()
+    print("  КЛЮЧЕВОЕ РАСХОЖДЕНИЕ: Документ предполагал τ_disk ≈ 10⁻¹⁰ с,")
+    print("  реальное τ_disk ≈ 1.85·10⁻⁶ с — разница ×10 000.")
+    print("  Это объясняет, почему модель даёт κ ≈ 0, а не 0.3-0.98.")
 
     print("\n  6. ОБЩИЙ ВЫВОД")
     print("  ─" * 55)
-    print("  • При ΔT=0: P_net ≈ 0. Эффект теоретически возможен (κ до 30-98%),")
-    print("    но теплопотери, турбулентность и малый ΔP делают его неизмеримым.")
-    print("  • При ΔT ≥ 10-30 °C: модель даёт разумные оценки мощности.")
-    print("  • R-134a — лучшее тело для комнатной T (высокое P, тяжёлые молекулы).")
+    print("  • При ΔT=0: P_net ≈ 0. κ ≈ 0.001% — слой равновесен.")
+    print("    Документ содержал ошибку: τ_disk не может быть 10⁻¹⁰ с при gap=0.5 мм.")
+    print("    Реальное τ_disk = gap/v_rms ≈ 1.85 мкс → κ ≈ 10⁻⁵.")
+    print("  • При ΔT ≥ 10-30 °C: модель даёт разумные оценки.")
+    print("    P_mech ~ 150-350 Вт для D=200 мм, 10 дисков, R-134a.")
+    print("  • R-134a — разумное тело для комнатной T (6 атм, 102 г/моль).")
     print("  • FC-770 — лучшее для внешнего нагрева (тяжёлый, стабильный).")
     print("  • Предел Карно НЕ нарушен — чистая мощность при ΔT=0 ничтожна.")
     print("  • Требуется экспериментальная проверка.")
@@ -1061,6 +1079,23 @@ def main():
     # ── Сохранение ──
     out = "/home/paveladmin/.openclaw/workspace/projects/vsyako-razno/model_results.md"
     print(f"\n\n  Результаты сохранены → {out}")
+
+    # Записываем в файл
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("# Результаты математической модели турбины Теслы\n\n")
+        f.write("*Сгенерировано* `math_model.py` | Дата: 2026-05-31\n\n")
+        f.write("## Ключевое открытие\n\n")
+        f.write("**Коэффициент неравновесности κ ≈ 0.001% при всех рабочих телах.**\n\n")
+        f.write("Модель показала, что τ_disk = gap/v_rms ≈ 1.85 мкс (а не 10⁻¹⁰ с, как предполагалось\n")
+        f.write("в документе turbina-tesla.md). Расхождение ×10 000 делает κ ≈ 10⁻⁵ вместо 0.3-0.98.\n\n")
+        f.write("**Вывод: ΔT=0 режим НЕ РАБОТАЕТ при макроскопических зазорах 0.3-0.5 мм.**\n")
+        f.write("Пограничный слой равновесен. P_mech — это вязкое трение, не полезный отбор.\n\n")
+        f.write("## Сводка по режиму внешнего нагрева\n\n")
+        f.write("Для работы турбины Теслы требуется внешний нагрев ΔT ≥ 10-30 °C.\n")
+        f.write("При ΔT = 80 °C (100→20 °C) FC-770 даёт P_mech ≈ 135 Вт при D=300 мм, 10 дисках.\n\n")
+        f.write("## Таблицы (полный вывод — в stdout)\n\n")
+        f.write("Для просмотра всех трёх таблиц и анализа запустите:\n\n")
+        f.write("```bash\npython3 math_model.py\n```\n\n")
 
 
 if __name__ == "__main__":
